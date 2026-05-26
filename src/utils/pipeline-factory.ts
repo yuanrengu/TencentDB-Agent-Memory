@@ -466,7 +466,7 @@ export function createL2Runner(opts: {
         logger.debug?.(
           `${TAG} [L2] No new L1 records since cursor (session=${sessionKey}, updatedAfter=${cursor ?? "(full)"}), skipping scene extraction`,
         );
-        return;
+        return { latestCursor: cursor || undefined };
       }
 
       logger.debug?.(
@@ -497,7 +497,7 @@ export function createL2Runner(opts: {
 
       if (sessionRecords.length === 0) {
         logger.debug?.(`${TAG} [L2] No new L1 records found (JSONL fallback, session=${sessionKey}), skipping scene extraction`);
-        return;
+        return { latestCursor: cursor || undefined };
       }
 
       records = sessionRecords.map((r) => ({
@@ -532,6 +532,15 @@ export function createL2Runner(opts: {
     const preTotalProcessed = preState.total_processed;
 
     const extractResult = await extractor.extract(memories);
+
+    // Compute latestCursor from the records we fetched, regardless of
+    // extraction success.  This ensures last_extraction_updated_time
+    // always advances so the next L2 run only fetches incremental rows
+    // even when extraction is a no-op or fails (e.g. LLM timeout).
+    const latestCursor = records.reduce((latest, r) => {
+      return r.updatedAt > latest ? r.updatedAt : latest;
+    }, "") || undefined;
+
     if (extractResult.success && extractResult.memoriesProcessed > 0) {
       const checkpoint = new CheckpointManager(pluginDataDir, logger);
       const postState = await checkpoint.read();
@@ -559,17 +568,14 @@ export function createL2Runner(opts: {
         await syncLocalProfilesToStore(pluginDataDir, vectorStore, profileBaseline, logger);
       }
       await checkpoint.incrementScenesProcessed();
-
-      const latestCursor = records.reduce((latest, r) => {
-        return r.updatedAt > latest ? r.updatedAt : latest;
-      }, "");
-
-      logger.debug?.(
-        `${TAG} [L2] Extraction complete: processed=${extractResult.memoriesProcessed}, latestCursor=${latestCursor}`,
-      );
-
-      return { latestCursor: latestCursor || undefined };
     }
+
+    logger.debug?.(
+      `${TAG} [L2] Extraction complete: processed=${extractResult.memoriesProcessed}, ` +
+      `latestCursor=${latestCursor ?? "(none)"}`,
+    );
+
+    return { latestCursor };
   };
 }
 
